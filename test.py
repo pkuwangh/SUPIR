@@ -1,4 +1,6 @@
-import torch.cuda
+import gc
+import time
+import torch
 import argparse
 from SUPIR.util import create_SUPIR_model, PIL2Tensor, Tensor2PIL, convert_dtype
 from PIL import Image
@@ -7,12 +9,16 @@ from CKPT_PTH import LLAVA_MODEL_PATH
 import os
 from torch.nn.functional import interpolate
 
+print(f"torch.cuda.device_count(): {torch.cuda.device_count()}")
+print(f"torch.cuda.current_device(): {torch.cuda.current_device()}")
+print(f"torch.cuda.get_device_name(): {torch.cuda.get_device_name()}")
+
 if torch.cuda.device_count() >= 2:
-    SUPIR_device = 'cuda:0'
-    LLaVA_device = 'cuda:1'
+    SUPIR_device = torch.device('cuda:0')
+    LLaVA_device = torch.device('cuda:1')
 elif torch.cuda.device_count() == 1:
-    SUPIR_device = 'cuda:0'
-    LLaVA_device = 'cuda:0'
+    SUPIR_device = torch.device('cuda')
+    LLaVA_device = torch.device('cuda')
 else:
     raise ValueError('Currently support CUDA only.')
 
@@ -56,22 +62,28 @@ parser.add_argument("--decoder_tile_size", type=int, default=64)
 parser.add_argument("--load_8bit_llava", action='store_true', default=False)
 args = parser.parse_args()
 print(args)
-use_llava = not args.no_llava
 
 # load SUPIR
-model = create_SUPIR_model('options/SUPIR_v0.yaml', SUPIR_sign=args.SUPIR_sign)
-if args.loading_half_params:
-    model = model.half()
-if args.use_tile_vae:
-    model.init_tile_vae(encoder_tile_size=args.encoder_tile_size, decoder_tile_size=args.decoder_tile_size)
-model.ae_dtype = convert_dtype(args.ae_dtype)
-model.model.dtype = convert_dtype(args.diff_dtype)
-model = model.to(SUPIR_device)
+def load_supir(args):
+    model = create_SUPIR_model('options/SUPIR_v0.yaml', SUPIR_sign=args.SUPIR_sign)
+    if args.loading_half_params:
+        model = model.half()
+    if args.use_tile_vae:
+        model.init_tile_vae(encoder_tile_size=args.encoder_tile_size, decoder_tile_size=args.decoder_tile_size)
+    model.ae_dtype = convert_dtype(args.ae_dtype)
+    model.model.dtype = convert_dtype(args.diff_dtype)
+    model = model.to(SUPIR_device)
+    return model
+
+
 # load LLaVA
-if use_llava:
-    llava_agent = LLavaAgent(LLAVA_MODEL_PATH, device=LLaVA_device, load_8bit=args.load_8bit_llava, load_4bit=False)
-else:
-    llava_agent = None
+def load_llava(args):
+    if not args.no_llava:
+        llava_agent = LLavaAgent(LLAVA_MODEL_PATH, device=LLaVA_device, load_8bit=args.load_8bit_llava, load_4bit=False)
+    else:
+        llava_agent = None
+    return llava_agent
+
 
 os.makedirs(args.save_dir, exist_ok=True)
 for img_pth in os.listdir(args.img_dir):
@@ -80,27 +92,48 @@ for img_pth in os.listdir(args.img_dir):
     LQ_ips = Image.open(os.path.join(args.img_dir, img_pth))
     LQ_img, h0, w0 = PIL2Tensor(LQ_ips, upsacle=args.upscale, min_size=args.min_size)
     LQ_img = LQ_img.unsqueeze(0).to(SUPIR_device)[:, :3, :, :]
+    print("======================================")
+    print(type(LQ_img), LQ_img.shape, LQ_img.dtype)
+    time.sleep(10)
 
     # step 1: Pre-denoise for LLaVA, resize to 512
+    model = load_supir(args)
     LQ_img_512, h1, w1 = PIL2Tensor(LQ_ips, upsacle=args.upscale, min_size=args.min_size, fix_resize=512)
     LQ_img_512 = LQ_img_512.unsqueeze(0).to(SUPIR_device)[:, :3, :, :]
     clean_imgs = model.batchify_denoise(LQ_img_512)
     clean_PIL_img = Tensor2PIL(clean_imgs[0], h1, w1)
+    model = None
+    print("======================================")
+    gc.collect()
+    torch.cuda.empty_cache()
+    time.sleep(10)
 
     # step 2: LLaVA
-    if use_llava:
+    llava_agent = load_llava(args)
+    if llava_agent is not None:
         captions = llava_agent.gen_image_caption([clean_PIL_img])
     else:
         captions = ['']
     print(captions)
+    llava_agent = None
+    print("======================================")
+    gc.collect()
+    torch.cuda.empty_cache()
+    time.sleep(10)
 
-    # # step 3: Diffusion Process
+    # step 3: Diffusion Process
+    model = load_supir(args)
     samples = model.batchify_sample(LQ_img, captions, num_steps=args.edm_steps, restoration_scale=args.s_stage1, s_churn=args.s_churn,
                                     s_noise=args.s_noise, cfg_scale=args.s_cfg, control_scale=args.s_stage2, seed=args.seed,
                                     num_samples=args.num_samples, p_p=args.a_prompt, n_p=args.n_prompt, color_fix_type=args.color_fix_type,
                                     use_linear_CFG=args.linear_CFG, use_linear_control_scale=args.linear_s_stage2,
                                     cfg_scale_start=args.spt_linear_CFG, control_scale_start=args.spt_linear_s_stage2)
+    model = None
+    print("======================================")
+    gc.collect()
+    torch.cuda.empty_cache()
+    time.sleep(10)
+
     # save
     for _i, sample in enumerate(samples):
         Tensor2PIL(sample, h0, w0).save(f'{args.save_dir}/{img_name}_{_i}.png')
-

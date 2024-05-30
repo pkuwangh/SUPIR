@@ -291,10 +291,10 @@ class MemoryEfficientCrossAttention(nn.Module):
         self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0, **kwargs
     ):
         super().__init__()
-        print(
-            f"Setting up {self.__class__.__name__}. Query dim is {query_dim}, context_dim is {context_dim} and using "
-            f"{heads} heads with a dimension of {dim_head}."
-        )
+        # print(
+        #     f"Setting up {self.__class__.__name__}. Query dim is {query_dim}, context_dim is {context_dim} and using "
+        #     f"{heads} heads with a dimension of {dim_head}."
+        #)
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
 
@@ -439,7 +439,8 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
         if self.checkpoint:
-            print(f"{self.__class__.__name__} is using checkpointing")
+            pass
+            # print(f"{self.__class__.__name__} is using checkpointing")
 
     def forward(
         self, x, context=None, additional_tokens=None, n_times_crossframe_attn_in_self=0
